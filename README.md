@@ -2,6 +2,12 @@
 
 Minimal, readable baseline for 3D orientation regression of paired IOS STL scans (upper/lower jaw).
 
+## Learning Guide
+
+If you are new to 3D point-cloud deep learning and want a guided walkthrough of the math, PyTorch flow, and this codebase, see:
+
+- [LEARNING_GUIDE.md](LEARNING_GUIDE.md)
+
 ## What this model does
 
 - Loads canonical upper/lower meshes for each case.
@@ -73,6 +79,40 @@ Inside `--output_dir`:
 - `pred_rotation.txt` (3x3 correction rotation matrix)
 
 The script also prints the predicted 3x3 matrix to stdout.
+
+## Visualizations
+
+### 1) Static point-cloud figure (great for reports)
+
+Generate a 2x2 image showing rotated input vs corrected point clouds:
+
+```bash
+python tools/visualize_sample.py \
+  --data_dir data \
+  --split val \
+  --index 0 \
+  --output outputs/visuals/sample_view.png
+```
+
+### 2) TensorBoard (reusable in most PyTorch projects)
+
+Write model graph, scalar error, and mesh visualizations:
+
+```bash
+python tools/tensorboard_demo.py \
+  --data_dir data \
+  --split val \
+  --checkpoint checkpoints/best.pt \
+  --log_dir runs/dental_pose_net_demo
+```
+
+Then open TensorBoard:
+
+```bash
+tensorboard --logdir runs
+```
+
+You can reuse this same TensorBoard pattern in other PyTorch codebases: `SummaryWriter`, `add_scalar`, `add_graph`, `add_mesh`.
 
 ## Notes
 

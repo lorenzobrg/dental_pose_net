@@ -31,6 +31,19 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=cfg.lr)
     parser.add_argument("--weight_decay", type=float, default=cfg.weight_decay)
     parser.add_argument("--num_workers", type=int, default=cfg.num_workers)
+    parser.add_argument(
+        "--cache_points",
+        dest="cache_points",
+        action="store_true",
+        help="Cache one normalized point sample per case in memory (recommended for low RAM stability)",
+    )
+    parser.add_argument(
+        "--no_cache_points",
+        dest="cache_points",
+        action="store_false",
+        help="Disable in-memory point cache and resample directly from STL each item",
+    )
+    parser.set_defaults(cache_points=cfg.cache_points)
     parser.add_argument("--seed", type=int, default=cfg.seed)
 
     parser.add_argument("--feature_dim", type=int, default=cfg.feature_dim)
@@ -111,6 +124,7 @@ def main() -> None:
         num_points_upper=args.num_points_upper,
         num_points_lower=args.num_points_lower,
         training=True,
+        cache_points_in_memory=args.cache_points,
         point_dropout=args.point_dropout,
         keep_ratio_min=args.keep_ratio_min,
         keep_ratio_max=args.keep_ratio_max,
@@ -124,6 +138,7 @@ def main() -> None:
         num_points_upper=args.num_points_upper,
         num_points_lower=args.num_points_lower,
         training=False,
+        cache_points_in_memory=args.cache_points,
         point_dropout=0.0,
         keep_ratio_min=1.0,
         keep_ratio_max=1.0,
@@ -135,15 +150,19 @@ def main() -> None:
     data_gen = torch.Generator()
     data_gen.manual_seed(args.seed)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
-        generator=data_gen,
-        drop_last=False,
-    )
+    train_loader_kwargs = {
+        "dataset": train_dataset,
+        "batch_size": args.batch_size,
+        "shuffle": True,
+        "num_workers": args.num_workers,
+        "generator": data_gen,
+        "drop_last": False,
+    }
+    if args.num_workers > 0:
+        train_loader_kwargs["worker_init_fn"] = seed_worker
+        train_loader_kwargs["prefetch_factor"] = 1
+        train_loader_kwargs["persistent_workers"] = True
+    train_loader = DataLoader(**train_loader_kwargs)
     # Keep validation deterministic and easy to compare between runs.
     val_loader = DataLoader(
         val_dataset,
@@ -151,6 +170,11 @@ def main() -> None:
         shuffle=False,
         num_workers=0,
         drop_last=False,
+    )
+
+    print(
+        f"Data settings | train_workers={args.num_workers} | cache_points={args.cache_points} "
+        f"| train_cases={len(train_dataset)} | val_cases={len(val_dataset)}"
     )
 
     model = PairPointNetRot6D(

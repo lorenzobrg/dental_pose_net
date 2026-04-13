@@ -21,6 +21,7 @@ class IOSPairRotationDataset(Dataset):
         num_points_upper: int,
         num_points_lower: int,
         training: bool,
+        cache_points_in_memory: bool = True,
         point_dropout: float = 0.1,
         keep_ratio_min: float = 0.75,
         keep_ratio_max: float = 1.0,
@@ -33,6 +34,7 @@ class IOSPairRotationDataset(Dataset):
         self.num_points_upper = num_points_upper
         self.num_points_lower = num_points_lower
         self.training = training
+        self.cache_points_in_memory = cache_points_in_memory
 
         self.point_dropout = point_dropout
         self.keep_ratio_min = keep_ratio_min
@@ -44,6 +46,10 @@ class IOSPairRotationDataset(Dataset):
         self.cases = self._discover_cases()
         if len(self.cases) == 0:
             raise RuntimeError(f"No valid cases found in {self.root}")
+
+        self._cached_points: list[dict[str, np.ndarray]] | None = None
+        if self.cache_points_in_memory:
+            self._cached_points = self._build_point_cache()
 
     def _discover_cases(self) -> List[Dict[str, Path]]:
         if not self.root.exists():
@@ -68,6 +74,25 @@ class IOSPairRotationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.cases)
 
+    def _build_point_cache(self) -> list[dict[str, np.ndarray]]:
+        cache: list[dict[str, np.ndarray]] = []
+        for idx, case in enumerate(self.cases):
+            rng = np.random.default_rng(self.base_seed + idx)
+            upper_mesh = load_mesh(case["upper"])
+            lower_mesh = load_mesh(case["lower"])
+
+            upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
+            lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
+            upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
+
+            cache.append(
+                {
+                    "upper": upper_points.astype(np.float32),
+                    "lower": lower_points.astype(np.float32),
+                }
+            )
+        return cache
+
     def _rng_for_index(self, idx: int) -> np.random.Generator:
         if self.training:
             # np.random is worker-seeded in DataLoader, then used to seed per-sample generator.
@@ -79,13 +104,17 @@ class IOSPairRotationDataset(Dataset):
         case = self.cases[idx]
         rng = self._rng_for_index(idx)
 
-        upper_mesh = load_mesh(case["upper"])
-        lower_mesh = load_mesh(case["lower"])
+        if self._cached_points is not None:
+            cached = self._cached_points[idx]
+            upper_points = cached["upper"]
+            lower_points = cached["lower"]
+        else:
+            upper_mesh = load_mesh(case["upper"])
+            lower_mesh = load_mesh(case["lower"])
 
-        upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
-        lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
-
-        upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
+            upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
+            lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
+            upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
 
         rotation_aug = random_rotation_matrix(rng)
         upper_input = rotate_points(upper_points, rotation_aug)

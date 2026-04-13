@@ -13,7 +13,8 @@ class TrainConfig:
     epochs: int = 80
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    num_workers: int = 4
+    num_workers: int = 0
+    cache_points: bool = True
     seed: int = 42
     feature_dim: int = 256
     head_hidden_dim: int = 256
