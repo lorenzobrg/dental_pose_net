@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List
 
@@ -21,7 +22,11 @@ class IOSPairRotationDataset(Dataset):
         num_points_upper: int,
         num_points_lower: int,
         training: bool,
+        subset_start: int = 0,
+        subset_end: int | None = None,
         cache_points_in_memory: bool = True,
+        cache_preload: bool = True,
+        cache_max_items: int = 16,
         point_dropout: float = 0.1,
         keep_ratio_min: float = 0.75,
         keep_ratio_max: float = 1.0,
@@ -34,7 +39,11 @@ class IOSPairRotationDataset(Dataset):
         self.num_points_upper = num_points_upper
         self.num_points_lower = num_points_lower
         self.training = training
+        self.subset_start = max(0, int(subset_start))
+        self.subset_end = subset_end
         self.cache_points_in_memory = cache_points_in_memory
+        self.cache_preload = cache_preload
+        self.cache_max_items = max(0, int(cache_max_items))
 
         self.point_dropout = point_dropout
         self.keep_ratio_min = keep_ratio_min
@@ -43,13 +52,20 @@ class IOSPairRotationDataset(Dataset):
         self.jitter_clip = jitter_clip
         self.base_seed = base_seed
 
-        self.cases = self._discover_cases()
+        all_cases = self._discover_cases()
+        end = len(all_cases) if self.subset_end is None else min(len(all_cases), int(self.subset_end))
+        if self.subset_start >= end:
+            raise RuntimeError(
+                f"Invalid subset range start={self.subset_start}, end={end}, total_cases={len(all_cases)}"
+            )
+        self.cases = all_cases[self.subset_start:end]
         if len(self.cases) == 0:
             raise RuntimeError(f"No valid cases found in {self.root}")
 
-        self._cached_points: list[dict[str, np.ndarray]] | None = None
-        if self.cache_points_in_memory:
-            self._cached_points = self._build_point_cache()
+        self._cached_points: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
+        self._preloaded_points: list[dict[str, np.ndarray]] | None = None
+        if self.cache_points_in_memory and self.cache_preload:
+            self._preloaded_points = self._build_point_cache()
 
     def _discover_cases(self) -> List[Dict[str, Path]]:
         if not self.root.exists():
@@ -76,22 +92,49 @@ class IOSPairRotationDataset(Dataset):
 
     def _build_point_cache(self) -> list[dict[str, np.ndarray]]:
         cache: list[dict[str, np.ndarray]] = []
-        for idx, case in enumerate(self.cases):
+        for idx in range(len(self.cases)):
             rng = np.random.default_rng(self.base_seed + idx)
-            upper_mesh = load_mesh(case["upper"])
-            lower_mesh = load_mesh(case["lower"])
-
-            upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
-            lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
-            upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
-
-            cache.append(
-                {
-                    "upper": upper_points.astype(np.float32),
-                    "lower": lower_points.astype(np.float32),
-                }
-            )
+            upper_points, lower_points = self._load_normalized_pair_points(idx, rng)
+            upper_points = upper_points.astype(np.float32)
+            lower_points = lower_points.astype(np.float32)
+            # Keep cache immutable to reduce accidental copy-on-write in workers.
+            upper_points.setflags(write=False)
+            lower_points.setflags(write=False)
+            cache.append({"upper": upper_points, "lower": lower_points})
         return cache
+
+    def _load_normalized_pair_points(self, idx: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+        case = self.cases[idx]
+        upper_mesh = load_mesh(case["upper"])
+        lower_mesh = load_mesh(case["lower"])
+
+        upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
+        lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
+        upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
+        return upper_points, lower_points
+
+    def _get_cached_or_load_points(self, idx: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+        if self._preloaded_points is not None:
+            cached = self._preloaded_points[idx]
+            return cached["upper"], cached["lower"]
+
+        if not self.cache_points_in_memory or self.cache_max_items == 0:
+            return self._load_normalized_pair_points(idx, rng)
+
+        cached = self._cached_points.get(idx)
+        if cached is not None:
+            # LRU refresh.
+            self._cached_points.move_to_end(idx)
+            return cached["upper"], cached["lower"]
+
+        upper_points, lower_points = self._load_normalized_pair_points(idx, rng)
+        self._cached_points[idx] = {
+            "upper": upper_points.astype(np.float32),
+            "lower": lower_points.astype(np.float32),
+        }
+        if len(self._cached_points) > self.cache_max_items:
+            self._cached_points.popitem(last=False)
+        return upper_points, lower_points
 
     def _rng_for_index(self, idx: int) -> np.random.Generator:
         if self.training:
@@ -104,17 +147,7 @@ class IOSPairRotationDataset(Dataset):
         case = self.cases[idx]
         rng = self._rng_for_index(idx)
 
-        if self._cached_points is not None:
-            cached = self._cached_points[idx]
-            upper_points = cached["upper"]
-            lower_points = cached["lower"]
-        else:
-            upper_mesh = load_mesh(case["upper"])
-            lower_mesh = load_mesh(case["lower"])
-
-            upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
-            lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
-            upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
+        upper_points, lower_points = self._get_cached_or_load_points(idx, rng)
 
         rotation_aug = random_rotation_matrix(rng)
         upper_input = rotate_points(upper_points, rotation_aug)

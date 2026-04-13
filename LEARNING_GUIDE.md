@@ -423,18 +423,19 @@ How this repo sits among them:
 
 ## 15. Commands You Will Use Often
 
+Prepare NPZ cache from STL (run first):
+
+```bash
+python prepare_npz_cache.py
+```
+
 Train:
 
 ```bash
-python train.py \
-  --data_dir data \
-  --save_dir checkpoints \
-  --epochs 80 \
-  --batch_size 8 \
-  --num_points_upper 2048 \
-  --num_points_lower 2048 \
-  --device cpu
+python train.py
 ```
+
+All settings are in `config.py` (data paths, points per scan, batch size, workers, augmentation, optimizer).
 
 Inference:
 

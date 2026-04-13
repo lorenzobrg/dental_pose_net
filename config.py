@@ -5,16 +5,18 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainConfig:
-    data_dir: str = "data"
+    stl_data_dir: str = "data"
+    npz_data_dir: str = "data_npz"
     save_dir: str = "checkpoints"
-    num_points_upper: int = 2048
-    num_points_lower: int = 2048
+    overwrite_npz_cache: bool = False
+    num_points_upper: int = 1028
+    num_points_lower: int = 1028
     batch_size: int = 8
     epochs: int = 80
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    num_workers: int = 0
-    cache_points: bool = True
+    num_workers: int = 4
+    resume_checkpoint: str = ""
     seed: int = 42
     feature_dim: int = 256
     head_hidden_dim: int = 256
@@ -30,7 +32,7 @@ class TrainConfig:
 
 @dataclass
 class InferConfig:
-    num_points_upper: int = 2048
-    num_points_lower: int = 2048
+    num_points_upper: int = 1028
+    num_points_lower: int = 1028
     device: str = "cpu"
     seed: int = 123

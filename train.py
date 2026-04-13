@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-import os
 import random
 from pathlib import Path
 from typing import Dict, Tuple
@@ -12,51 +10,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import TrainConfig
-from dataset import IOSPairRotationDataset
+from dataset_npz import IOSPairRotationNPZDataset
 from models.pair_pointnet_rot6d import PairPointNetRot6D
 from utils.geometry import geodesic_distance_rad, geodesic_loss
 from utils.metrics import summarize_rotation_errors
-
-
-def build_argparser() -> argparse.ArgumentParser:
-    cfg = TrainConfig()
-    parser = argparse.ArgumentParser(description="Train paired PointNet baseline for IOS orientation regression")
-
-    parser.add_argument("--data_dir", type=str, default=cfg.data_dir)
-    parser.add_argument("--save_dir", type=str, default=cfg.save_dir)
-    parser.add_argument("--num_points_upper", type=int, default=cfg.num_points_upper)
-    parser.add_argument("--num_points_lower", type=int, default=cfg.num_points_lower)
-    parser.add_argument("--batch_size", type=int, default=cfg.batch_size)
-    parser.add_argument("--epochs", type=int, default=cfg.epochs)
-    parser.add_argument("--lr", type=float, default=cfg.lr)
-    parser.add_argument("--weight_decay", type=float, default=cfg.weight_decay)
-    parser.add_argument("--num_workers", type=int, default=cfg.num_workers)
-    parser.add_argument(
-        "--cache_points",
-        dest="cache_points",
-        action="store_true",
-        help="Cache one normalized point sample per case in memory (recommended for low RAM stability)",
-    )
-    parser.add_argument(
-        "--no_cache_points",
-        dest="cache_points",
-        action="store_false",
-        help="Disable in-memory point cache and resample directly from STL each item",
-    )
-    parser.set_defaults(cache_points=cfg.cache_points)
-    parser.add_argument("--seed", type=int, default=cfg.seed)
-
-    parser.add_argument("--feature_dim", type=int, default=cfg.feature_dim)
-    parser.add_argument("--head_hidden_dim", type=int, default=cfg.head_hidden_dim)
-
-    parser.add_argument("--point_dropout", type=float, default=cfg.point_dropout)
-    parser.add_argument("--keep_ratio_min", type=float, default=cfg.keep_ratio_min)
-    parser.add_argument("--keep_ratio_max", type=float, default=cfg.keep_ratio_max)
-    parser.add_argument("--jitter_std", type=float, default=cfg.jitter_std)
-    parser.add_argument("--jitter_clip", type=float, default=cfg.jitter_clip)
-
-    parser.add_argument("--device", type=str, default=cfg.device)
-    return parser
+from utils.npz_cache import npz_cache_ready
 
 
 def set_global_seed(seed: int) -> None:
@@ -109,92 +67,109 @@ def run_epoch(
 
 
 def main() -> None:
-    args = build_argparser().parse_args()
-    set_global_seed(args.seed)
+    cfg = TrainConfig()
+    set_global_seed(cfg.seed)
 
-    requested_device = args.device.lower()
+    if not npz_cache_ready(cfg.npz_data_dir):
+        raise RuntimeError(
+            "NPZ cache is missing. Run 'python prepare_npz_cache.py' before training."
+        )
+
+    requested_device = cfg.device.lower()
     if requested_device == "cuda" and not torch.cuda.is_available():
         print("CUDA requested but not available, falling back to CPU.")
         requested_device = "cpu"
     device = torch.device(requested_device)
 
-    train_dataset = IOSPairRotationDataset(
-        data_dir=args.data_dir,
+    train_dataset = IOSPairRotationNPZDataset(
+        npz_data_dir=cfg.npz_data_dir,
         split="train",
-        num_points_upper=args.num_points_upper,
-        num_points_lower=args.num_points_lower,
         training=True,
-        cache_points_in_memory=args.cache_points,
-        point_dropout=args.point_dropout,
-        keep_ratio_min=args.keep_ratio_min,
-        keep_ratio_max=args.keep_ratio_max,
-        jitter_std=args.jitter_std,
-        jitter_clip=args.jitter_clip,
-        base_seed=args.seed,
+        point_dropout=cfg.point_dropout,
+        keep_ratio_min=cfg.keep_ratio_min,
+        keep_ratio_max=cfg.keep_ratio_max,
+        jitter_std=cfg.jitter_std,
+        jitter_clip=cfg.jitter_clip,
+        base_seed=cfg.seed,
     )
-    val_dataset = IOSPairRotationDataset(
-        data_dir=args.data_dir,
+    val_dataset = IOSPairRotationNPZDataset(
+        npz_data_dir=cfg.npz_data_dir,
         split="val",
-        num_points_upper=args.num_points_upper,
-        num_points_lower=args.num_points_lower,
         training=False,
-        cache_points_in_memory=args.cache_points,
         point_dropout=0.0,
         keep_ratio_min=1.0,
         keep_ratio_max=1.0,
         jitter_std=0.0,
         jitter_clip=0.0,
-        base_seed=args.seed + 1,
+        base_seed=cfg.seed + 1,
     )
 
     data_gen = torch.Generator()
-    data_gen.manual_seed(args.seed)
+    data_gen.manual_seed(cfg.seed)
 
     train_loader_kwargs = {
         "dataset": train_dataset,
-        "batch_size": args.batch_size,
+        "batch_size": cfg.batch_size,
         "shuffle": True,
-        "num_workers": args.num_workers,
+        "num_workers": cfg.num_workers,
         "generator": data_gen,
         "drop_last": False,
     }
-    if args.num_workers > 0:
+    if cfg.num_workers > 0:
         train_loader_kwargs["worker_init_fn"] = seed_worker
         train_loader_kwargs["prefetch_factor"] = 1
         train_loader_kwargs["persistent_workers"] = True
+
     train_loader = DataLoader(**train_loader_kwargs)
-    # Keep validation deterministic and easy to compare between runs.
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=cfg.batch_size,
         shuffle=False,
         num_workers=0,
         drop_last=False,
     )
 
     print(
-        f"Data settings | train_workers={args.num_workers} | cache_points={args.cache_points} "
-        f"| train_cases={len(train_dataset)} | val_cases={len(val_dataset)}"
+        "Data settings "
+        f"| source=npz_cache "
+        f"| train_workers={cfg.num_workers} "
+        f"| batch_size={cfg.batch_size} "
+        f"| points_upper={cfg.num_points_upper} "
+        f"| points_lower={cfg.num_points_lower} "
+        f"| train_cases={len(train_dataset)} "
+        f"| val_cases={len(val_dataset)}"
     )
 
     model = PairPointNetRot6D(
-        feature_dim=args.feature_dim,
-        head_hidden_dim=args.head_hidden_dim,
+        feature_dim=cfg.feature_dim,
+        head_hidden_dim=cfg.head_hidden_dim,
     ).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
     )
 
-    save_dir = Path(args.save_dir)
+    start_epoch = 1
+    if cfg.resume_checkpoint:
+        resume_path = Path(cfg.resume_checkpoint)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        print(f"Resumed from checkpoint: {resume_path} (start_epoch={start_epoch})")
+
+    save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = save_dir / "best.pt"
 
     best_val_mean = float("inf")
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, cfg.epochs + 1):
         train_loss, train_metrics = run_epoch(model, train_loader, optimizer, device)
         val_loss, val_metrics = run_epoch(model, val_loader, optimizer=None, device=device)
 
@@ -205,13 +180,13 @@ def main() -> None:
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "config": vars(args),
+                "config": vars(cfg),
                 "val_metrics": val_metrics,
             }
             torch.save(checkpoint, best_path)
 
         print(
-            f"Epoch {epoch:03d}/{args.epochs:03d} "
+            f"Epoch {epoch:03d}/{cfg.epochs:03d} "
             f"| train_loss(rad): {train_loss:.4f} "
             f"| train_mean_deg: {train_metrics['mean_deg']:.2f} "
             f"| val_loss(rad): {val_loss:.4f} "
