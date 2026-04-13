@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List
 
@@ -11,13 +12,14 @@ from utils.geometry import augment_points, random_rotation_matrix, rotate_points
 
 
 class IOSPairRotationNPZDataset(Dataset):
-    """NPZ-backed paired dataset with mandatory in-memory preload cache."""
+    """NPZ-backed paired dataset with mandatory bounded RAM cache (LRU)."""
 
     def __init__(
         self,
         npz_data_dir: str,
         split: str,
         training: bool,
+        ram_cache_size: int,
         point_dropout: float = 0.1,
         keep_ratio_min: float = 0.75,
         keep_ratio_max: float = 1.0,
@@ -28,6 +30,7 @@ class IOSPairRotationNPZDataset(Dataset):
         self.root = Path(npz_data_dir) / split
         self.split = split
         self.training = training
+        self.ram_cache_size = max(1, int(ram_cache_size))
 
         self.point_dropout = point_dropout
         self.keep_ratio_min = keep_ratio_min
@@ -37,7 +40,7 @@ class IOSPairRotationNPZDataset(Dataset):
         self.base_seed = base_seed
 
         self.files = self._discover_npz_files()
-        self.samples = self._preload_all_samples()
+        self._ram_cache: OrderedDict[int, Dict[str, np.ndarray | str]] = OrderedDict()
 
     def _discover_npz_files(self) -> List[Path]:
         if not self.root.exists():
@@ -47,32 +50,39 @@ class IOSPairRotationNPZDataset(Dataset):
             raise RuntimeError(f"No NPZ files found in {self.root}")
         return files
 
-    def _preload_all_samples(self) -> List[Dict[str, np.ndarray | str]]:
-        samples: List[Dict[str, np.ndarray | str]] = []
-        for path in self.files:
-            data = np.load(path, allow_pickle=False)
+    def _load_npz(self, idx: int) -> Dict[str, np.ndarray | str]:
+        path = self.files[idx]
+        with np.load(path, allow_pickle=False) as data:
             upper = np.asarray(data["upper"], dtype=np.float32)
             lower = np.asarray(data["lower"], dtype=np.float32)
 
-            if upper.ndim != 2 or upper.shape[1] != 3:
-                raise ValueError(f"Invalid upper shape in {path}: {upper.shape}")
-            if lower.ndim != 2 or lower.shape[1] != 3:
-                raise ValueError(f"Invalid lower shape in {path}: {lower.shape}")
+        if upper.ndim != 2 or upper.shape[1] != 3:
+            raise ValueError(f"Invalid upper shape in {path}: {upper.shape}")
+        if lower.ndim != 2 or lower.shape[1] != 3:
+            raise ValueError(f"Invalid lower shape in {path}: {lower.shape}")
 
-            upper.setflags(write=False)
-            lower.setflags(write=False)
+        upper.setflags(write=False)
+        lower.setflags(write=False)
+        return {
+            "upper": upper,
+            "lower": lower,
+            "case_id": str(path.stem),
+        }
 
-            samples.append(
-                {
-                    "upper": upper,
-                    "lower": lower,
-                    "case_id": str(path.stem),
-                }
-            )
-        return samples
+    def _get_cached_sample(self, idx: int) -> Dict[str, np.ndarray | str]:
+        cached = self._ram_cache.get(idx)
+        if cached is not None:
+            self._ram_cache.move_to_end(idx)
+            return cached
+
+        sample = self._load_npz(idx)
+        self._ram_cache[idx] = sample
+        if len(self._ram_cache) > self.ram_cache_size:
+            self._ram_cache.popitem(last=False)
+        return sample
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.files)
 
     def _rng_for_index(self, idx: int) -> np.random.Generator:
         if self.training:
@@ -82,7 +92,7 @@ class IOSPairRotationNPZDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | str]:
         rng = self._rng_for_index(idx)
-        sample = self.samples[idx]
+        sample = self._get_cached_sample(idx)
 
         upper_points = sample["upper"]
         lower_points = sample["lower"]

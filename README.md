@@ -62,7 +62,7 @@ Default config values are:
 - points per scan: 1028 (upper) and 1028 (lower)
 - batch size: 8
 - workers: 4
-- cache: mandatory in-memory preload from NPZ
+- cache: mandatory NPZ cache with bounded RAM LRU window
 
 ## Inference
 

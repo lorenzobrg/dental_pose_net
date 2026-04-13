@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+import trimesh
 
 from utils.geometry import joint_normalize_pair
-from utils.io_mesh import load_mesh, sample_points_from_mesh
+from utils.io_mesh import sample_points_from_mesh
 
 
 def discover_cases(split_root: Path) -> List[Dict[str, Path]]:
@@ -46,11 +48,11 @@ def build_npz_cache(
                 continue
 
             rng = np.random.default_rng(seed + idx)
-            upper_mesh = load_mesh(case["upper"])
-            lower_mesh = load_mesh(case["lower"])
+            upper_loaded = trimesh.load(case["upper"], process=False)
+            lower_loaded = trimesh.load(case["lower"], process=False)
 
-            upper_points = sample_points_from_mesh(upper_mesh, num_points_upper, rng)
-            lower_points = sample_points_from_mesh(lower_mesh, num_points_lower, rng)
+            upper_points = _sample_points_from_loaded_mesh(upper_loaded, num_points_upper, rng)
+            lower_points = _sample_points_from_loaded_mesh(lower_loaded, num_points_lower, rng)
             upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
 
             np.savez_compressed(
@@ -59,6 +61,55 @@ def build_npz_cache(
                 lower=lower_points.astype(np.float32),
                 case_id=np.array(case["case_id"]),
             )
+
+            # Release large mesh objects aggressively to keep preprocessing RAM bounded.
+            del upper_loaded
+            del lower_loaded
+            del upper_points
+            del lower_points
+            gc.collect()
+
+
+def _sample_points_from_loaded_mesh(
+    loaded: trimesh.Trimesh | trimesh.Scene,
+    num_points: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if isinstance(loaded, trimesh.Trimesh):
+        return sample_points_from_mesh(loaded, num_points, rng)
+
+    if not isinstance(loaded, trimesh.Scene):
+        raise TypeError(f"Unsupported mesh type: {type(loaded)}")
+
+    geometries = [geom for geom in loaded.geometry.values() if isinstance(geom, trimesh.Trimesh)]
+    if len(geometries) == 0:
+        raise ValueError("Scene has no Trimesh geometry")
+    if len(geometries) == 1:
+        return sample_points_from_mesh(geometries[0], num_points, rng)
+
+    areas = np.array([float(getattr(g, "area", 0.0)) for g in geometries], dtype=np.float64)
+    if not np.isfinite(areas).all() or float(areas.sum()) <= 1e-12:
+        areas = np.array([max(1, int(np.asarray(g.vertices).shape[0])) for g in geometries], dtype=np.float64)
+
+    probs = areas / float(areas.sum())
+    counts = rng.multinomial(num_points, probs)
+
+    chunks: list[np.ndarray] = []
+    for geom, count in zip(geometries, counts):
+        if count <= 0:
+            continue
+        chunks.append(sample_points_from_mesh(geom, int(count), rng))
+
+    if len(chunks) == 0:
+        raise RuntimeError("Failed to sample points from Scene geometries")
+
+    points = np.concatenate(chunks, axis=0).astype(np.float32)
+    if points.shape[0] == num_points:
+        return points
+
+    replace = points.shape[0] < num_points
+    idx = rng.choice(points.shape[0], size=num_points, replace=replace)
+    return points[idx].astype(np.float32)
 
 
 def npz_cache_ready(npz_data_dir: str) -> bool:

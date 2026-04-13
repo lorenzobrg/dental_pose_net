@@ -34,16 +34,28 @@ def run_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
+    phase: str,
+    epoch: int,
+    total_epochs: int,
+    log_every_steps: int,
 ) -> Tuple[float, Dict[str, float]]:
     training = optimizer is not None
     model.train(training)
 
     losses = []
     all_errors = []
+    running_loss = 0.0
+    running_deg = 0.0
 
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
-        for batch in tqdm(loader, leave=False):
+        pbar = tqdm(
+            loader,
+            leave=False,
+            dynamic_ncols=True,
+            desc=f"{phase} {epoch:03d}/{total_epochs:03d}",
+        )
+        for step, batch in enumerate(pbar, start=1):
             upper = batch["upper"].to(device)
             lower = batch["lower"].to(device)
             target_rot = batch["target_rot"].to(device)
@@ -59,6 +71,15 @@ def run_epoch(
             losses.append(float(loss.item()))
             errors_deg = geodesic_distance_rad(pred_rot, target_rot) * (180.0 / np.pi)
             all_errors.append(errors_deg.detach().cpu().numpy())
+
+            running_loss += float(loss.item())
+            running_deg += float(errors_deg.mean().item())
+            should_update = (step == 1) or (step % log_every_steps == 0) or (step == len(loader))
+            if should_update:
+                pbar.set_postfix(
+                    loss=f"{running_loss / step:.4f}",
+                    mean_deg=f"{running_deg / step:.2f}",
+                )
 
     loss_mean = float(np.mean(losses)) if losses else 0.0
     errors = np.concatenate(all_errors) if all_errors else np.array([], dtype=np.float32)
@@ -85,6 +106,7 @@ def main() -> None:
         npz_data_dir=cfg.npz_data_dir,
         split="train",
         training=True,
+        ram_cache_size=cfg.npz_ram_cache_size,
         point_dropout=cfg.point_dropout,
         keep_ratio_min=cfg.keep_ratio_min,
         keep_ratio_max=cfg.keep_ratio_max,
@@ -96,6 +118,7 @@ def main() -> None:
         npz_data_dir=cfg.npz_data_dir,
         split="val",
         training=False,
+        ram_cache_size=cfg.npz_ram_cache_size,
         point_dropout=0.0,
         keep_ratio_min=1.0,
         keep_ratio_max=1.0,
@@ -133,12 +156,14 @@ def main() -> None:
         "Data settings "
         f"| source=npz_cache "
         f"| train_workers={cfg.num_workers} "
+        f"| npz_ram_cache_size={cfg.npz_ram_cache_size} "
         f"| batch_size={cfg.batch_size} "
         f"| points_upper={cfg.num_points_upper} "
         f"| points_lower={cfg.num_points_lower} "
         f"| train_cases={len(train_dataset)} "
         f"| val_cases={len(val_dataset)}"
     )
+    print("Columns: epoch | train_deg | val_deg | val_median | <5% | <10% | <15% | best | ckpt")
 
     model = PairPointNetRot6D(
         feature_dim=cfg.feature_dim,
@@ -169,9 +194,28 @@ def main() -> None:
 
     best_val_mean = float("inf")
 
-    for epoch in range(start_epoch, cfg.epochs + 1):
-        train_loss, train_metrics = run_epoch(model, train_loader, optimizer, device)
-        val_loss, val_metrics = run_epoch(model, val_loader, optimizer=None, device=device)
+    epoch_bar = tqdm(range(start_epoch, cfg.epochs + 1), desc="epochs", dynamic_ncols=True)
+    for epoch in epoch_bar:
+        train_loss, train_metrics = run_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            phase="train",
+            epoch=epoch,
+            total_epochs=cfg.epochs,
+            log_every_steps=cfg.log_every_steps,
+        )
+        val_loss, val_metrics = run_epoch(
+            model,
+            val_loader,
+            optimizer=None,
+            device=device,
+            phase="val",
+            epoch=epoch,
+            total_epochs=cfg.epochs,
+            log_every_steps=max(1, cfg.log_every_steps // 2),
+        )
 
         improved = val_metrics["mean_deg"] < best_val_mean
         if improved:
@@ -185,18 +229,17 @@ def main() -> None:
             }
             torch.save(checkpoint, best_path)
 
-        print(
-            f"Epoch {epoch:03d}/{cfg.epochs:03d} "
-            f"| train_loss(rad): {train_loss:.4f} "
-            f"| train_mean_deg: {train_metrics['mean_deg']:.2f} "
-            f"| val_loss(rad): {val_loss:.4f} "
-            f"| val_mean_deg: {val_metrics['mean_deg']:.2f} "
-            f"| val_median_deg: {val_metrics['median_deg']:.2f} "
-            f"| <5: {val_metrics['acc_5deg']:.1f}% "
-            f"| <10: {val_metrics['acc_10deg']:.1f}% "
-            f"| <15: {val_metrics['acc_15deg']:.1f}% "
-            f"| best: {best_val_mean:.2f} "
-            f"{'| saved' if improved else ''}"
+        epoch_bar.set_postfix(best_deg=f"{best_val_mean:.2f}", val_deg=f"{val_metrics['mean_deg']:.2f}")
+        tqdm.write(
+            f"{epoch:03d} | "
+            f"{train_metrics['mean_deg']:8.2f} | "
+            f"{val_metrics['mean_deg']:7.2f} | "
+            f"{val_metrics['median_deg']:10.2f} | "
+            f"{val_metrics['acc_5deg']:4.1f} | "
+            f"{val_metrics['acc_10deg']:5.1f} | "
+            f"{val_metrics['acc_15deg']:5.1f} | "
+            f"{best_val_mean:6.2f} | "
+            f"{'saved' if improved else '-'}"
         )
 
     print(f"Training finished. Best checkpoint: {best_path}")

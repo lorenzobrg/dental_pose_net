@@ -9,15 +9,17 @@ class TrainConfig:
     npz_data_dir: str = "data_npz"
     save_dir: str = "checkpoints"
     overwrite_npz_cache: bool = False
-    num_points_upper: int = 1028
-    num_points_lower: int = 1028
+    npz_ram_cache_size: int = 64
+    num_points_upper: int = 2056
+    num_points_lower: int = 2056
     batch_size: int = 8
-    epochs: int = 80
+    epochs: int = 400
     lr: float = 1e-3
     weight_decay: float = 1e-4
     num_workers: int = 4
+    log_every_steps: int = 100
     resume_checkpoint: str = ""
-    seed: int = 42
+    seed: int = 123
     feature_dim: int = 256
     head_hidden_dim: int = 256
 
@@ -32,7 +34,7 @@ class TrainConfig:
 
 @dataclass
 class InferConfig:
-    num_points_upper: int = 1028
-    num_points_lower: int = 1028
+    num_points_upper: int = 2056
+    num_points_lower: int = 2056
     device: str = "cpu"
     seed: int = 123
