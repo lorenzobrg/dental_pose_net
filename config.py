@@ -12,7 +12,7 @@ class TrainConfig:
     npz_ram_cache_size: int = 64
     num_points_upper: int = 2056
     num_points_lower: int = 2056
-    batch_size: int = 8
+    batch_size: int = 32
     epochs: int = 400
     lr: float = 1e-3
     weight_decay: float = 1e-4
