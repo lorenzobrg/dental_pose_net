@@ -13,7 +13,7 @@ class TrainConfig:
     num_points_upper: int = 2056
     num_points_lower: int = 2056
     batch_size: int = 32
-    epochs: int = 400
+    epochs: int = 100
     lr: float = 1e-3
     lr_warmup_epochs: int = 12
     lr_min_ratio: float = 0.05
@@ -22,7 +22,7 @@ class TrainConfig:
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
     override_lr_on_resume: bool = False
-    num_workers: int = 16
+    num_workers: int = 4
     log_every_steps: int = 100
     resume_checkpoint: str = ""
     seed: int = 123
