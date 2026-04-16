@@ -113,7 +113,7 @@ class IOSPairRotationDataset(Dataset):
             upper_points, lower_points = self._load_normalized_pair_points(idx, rng)
             upper_points = upper_points.astype(np.float32)
             lower_points = lower_points.astype(np.float32)
-            # Keep cache immutable to reduce accidental copy-on-write in workers.
+            # Keep cached arrays read-only to avoid worker copy-on-write faults.
             upper_points.setflags(write=False)
             lower_points.setflags(write=False)
             cache.append({"upper": upper_points, "lower": lower_points})
@@ -145,7 +145,7 @@ class IOSPairRotationDataset(Dataset):
 
         cached = self._cached_points.get(idx)
         if cached is not None:
-            # LRU refresh.
+            # Update LRU order.
             self._cached_points.move_to_end(idx)
             return cached["upper"], cached["lower"]
 
@@ -160,7 +160,7 @@ class IOSPairRotationDataset(Dataset):
 
     def _rng_for_index(self, idx: int) -> np.random.Generator:
         if self.training:
-            # np.random is worker-seeded in DataLoader, then used to seed per-sample generator.
+            # Draw per-sample seed from worker-initialized NumPy RNG state.
             seed = int(np.random.randint(0, np.iinfo(np.uint32).max, dtype=np.uint32))
             return np.random.default_rng(seed)
         return np.random.default_rng(self.base_seed + idx)

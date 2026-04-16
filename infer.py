@@ -43,6 +43,7 @@ def main() -> None:
         print("CUDA requested but not available, falling back to CPU.")
         requested_device = "cpu"
     device = torch.device(requested_device)
+    non_blocking = device.type == "cuda"
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     train_cfg = checkpoint.get("config", {})
@@ -71,8 +72,12 @@ def main() -> None:
 
     upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
 
-    upper_tensor = torch.from_numpy(upper_points).unsqueeze(0).to(device)
-    lower_tensor = torch.from_numpy(lower_points).unsqueeze(0).to(device)
+    upper_tensor = torch.from_numpy(upper_points).unsqueeze(0).to(
+        device, non_blocking=non_blocking
+    )
+    lower_tensor = torch.from_numpy(lower_points).unsqueeze(0).to(
+        device, non_blocking=non_blocking
+    )
 
     with torch.no_grad():
         _, pred_rotation_model_frame = model(upper_tensor, lower_tensor)

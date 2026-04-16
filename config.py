@@ -39,12 +39,12 @@ class TrainConfig:
     jitter_std: float = 0.001
     jitter_clip: float = 0.003
 
-    device: str = "cpu"
+    device: str = "cuda"
 
 
 @dataclass
 class InferConfig:
     num_points_upper: int = 2056
     num_points_lower: int = 2056
-    device: str = "cpu"
+    device: str = "cuda"
     seed: int = 123

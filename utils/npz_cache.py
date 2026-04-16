@@ -62,7 +62,7 @@ def build_npz_cache(
                 case_id=np.array(case["case_id"]),
             )
 
-            # Release large mesh objects aggressively to keep preprocessing RAM bounded.
+            # Drop large temporaries to keep preprocessing memory bounded.
             del upper_loaded
             del lower_loaded
             del upper_points

@@ -42,7 +42,7 @@ class CosineWarmupLRScheduler:
         self.optimizer = optimizer
         self.total_epochs = max(1, int(total_epochs))
         self.warmup_epochs = max(0, int(warmup_epochs))
-        # Keep at least one epoch for cosine stage when possible.
+        # Keep one epoch for cosine decay when total_epochs > warmup_epochs.
         self.warmup_epochs = min(self.warmup_epochs, max(0, self.total_epochs - 1))
         self.min_ratio = float(np.clip(min_ratio, 0.0, 1.0))
         self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
@@ -116,9 +116,10 @@ def run_epoch(
             desc=f"{phase} {epoch:03d}/{total_epochs:03d}",
         )
         for step, batch in enumerate(pbar, start=1):
-            upper = batch["upper"].to(device)
-            lower = batch["lower"].to(device)
-            target_rot = batch["target_rot"].to(device)
+            non_blocking = device.type == "cuda"
+            upper = batch["upper"].to(device, non_blocking=non_blocking)
+            lower = batch["lower"].to(device, non_blocking=non_blocking)
+            target_rot = batch["target_rot"].to(device, non_blocking=non_blocking)
 
             _, pred_rot = model(upper, lower)
             loss = geodesic_loss(pred_rot, target_rot)
@@ -169,6 +170,7 @@ def main() -> None:
         print("CUDA requested but not available, falling back to CPU.")
         requested_device = "cpu"
     device = torch.device(requested_device)
+    use_cuda = device.type == "cuda"
 
     train_dataset = IOSPairRotationNPZDataset(
         npz_data_dir=cfg.npz_data_dir,
@@ -211,6 +213,7 @@ def main() -> None:
         "num_workers": cfg.num_workers,
         "generator": data_gen,
         "drop_last": False,
+        "pin_memory": use_cuda,
     }
     if cfg.num_workers > 0:
         train_loader_kwargs["worker_init_fn"] = seed_worker
@@ -224,6 +227,7 @@ def main() -> None:
         shuffle=False,
         num_workers=0,
         drop_last=False,
+        pin_memory=use_cuda,
     )
 
     print(
@@ -232,6 +236,8 @@ def main() -> None:
         f"| train_workers={cfg.num_workers} "
         f"| npz_ram_cache_size={cfg.npz_ram_cache_size} "
         f"| batch_size={cfg.batch_size} "
+        f"| pin_memory={use_cuda} "
+        f"| device={device.type} "
         f"| rot_yaw={cfg.rotation_yaw_deg} "
         f"| rot_pitch={cfg.rotation_pitch_deg} "
         f"| rot_roll={cfg.rotation_roll_deg} "
