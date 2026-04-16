@@ -58,10 +58,16 @@ python train.py
 
 Best model is saved to `checkpoints/best.pt` based on validation mean rotation error (degrees).
 
-Default config values are:
-- points per scan: 1028 (upper) and 1028 (lower)
-- batch size: 8
-- workers: 4
+Stability controls in `TrainConfig` include:
+- cosine LR schedule with linear warmup (`lr_warmup_epochs`, `lr_min_ratio`)
+- optional gradient clipping (`grad_clip_norm`, set `0.0` to disable)
+- optional early stopping (`early_stopping_patience`, `early_stopping_min_delta`)
+- resume-safe LR override (`override_lr_on_resume`)
+
+Typical defaults are:
+- points per scan: 2056 (upper) and 2056 (lower)
+- batch size: 32
+- workers: 16
 - cache: mandatory NPZ cache with bounded RAM LRU window
 
 ## Inference

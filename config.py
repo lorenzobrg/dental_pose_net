@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainConfig:
-    stl_data_dir: str = "data"
+    stl_data_dir: str = "/datasets/Bits2Bites/"
     npz_data_dir: str = "data_npz"
     save_dir: str = "checkpoints"
     overwrite_npz_cache: bool = False
@@ -15,19 +15,29 @@ class TrainConfig:
     batch_size: int = 32
     epochs: int = 400
     lr: float = 1e-3
+    lr_warmup_epochs: int = 12
+    lr_min_ratio: float = 0.05
     weight_decay: float = 1e-4
-    num_workers: int = 4
+    grad_clip_norm: float = 0.0
+    early_stopping_patience: int = 0
+    early_stopping_min_delta: float = 0.0
+    override_lr_on_resume: bool = False
+    num_workers: int = 16
     log_every_steps: int = 100
     resume_checkpoint: str = ""
     seed: int = 123
     feature_dim: int = 256
     head_hidden_dim: int = 256
 
-    point_dropout: float = 0.1
-    keep_ratio_min: float = 0.75
+    rotation_yaw_deg: float = 90.0
+    rotation_pitch_deg: float = 10.0
+    rotation_roll_deg: float = 10.0
+
+    point_dropout: float = 0.02
+    keep_ratio_min: float = 0.9
     keep_ratio_max: float = 1.0
-    jitter_std: float = 0.002
-    jitter_clip: float = 0.01
+    jitter_std: float = 0.001
+    jitter_clip: float = 0.003
 
     device: str = "cpu"
 

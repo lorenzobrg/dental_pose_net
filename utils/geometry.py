@@ -22,7 +22,12 @@ def joint_normalize_pair(
 
     upper_norm = (upper_points - center) / scale
     lower_norm = (lower_points - center) / scale
-    return upper_norm.astype(np.float32), lower_norm.astype(np.float32), center.astype(np.float32), scale
+    return (
+        upper_norm.astype(np.float32),
+        lower_norm.astype(np.float32),
+        center.astype(np.float32),
+        scale,
+    )
 
 
 def rotate_points(points: np.ndarray, rotation: np.ndarray) -> np.ndarray:
@@ -30,27 +35,64 @@ def rotate_points(points: np.ndarray, rotation: np.ndarray) -> np.ndarray:
     return (points @ rotation.T).astype(np.float32)
 
 
-def random_rotation_matrix(rng: np.random.Generator) -> np.ndarray:
-    """Uniform random SO(3) matrix via random quaternion sampling."""
-    u1, u2, u3 = rng.random(3)
-    qx = np.sqrt(1.0 - u1) * np.sin(2.0 * np.pi * u2)
-    qy = np.sqrt(1.0 - u1) * np.cos(2.0 * np.pi * u2)
-    qz = np.sqrt(u1) * np.sin(2.0 * np.pi * u3)
-    qw = np.sqrt(u1) * np.cos(2.0 * np.pi * u3)
-
-    xx, yy, zz = qx * qx, qy * qy, qz * qz
-    xy, xz, yz = qx * qy, qx * qz, qy * qz
-    wx, wy, wz = qw * qx, qw * qy, qw * qz
-
-    rotation = np.array(
+def _rotation_x(angle_rad: float) -> np.ndarray:
+    c = float(np.cos(angle_rad))
+    s = float(np.sin(angle_rad))
+    return np.array(
         [
-            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+            [1.0, 0.0, 0.0],
+            [0.0, c, -s],
+            [0.0, s, c],
         ],
         dtype=np.float32,
     )
-    return rotation
+
+
+def _rotation_y(angle_rad: float) -> np.ndarray:
+    c = float(np.cos(angle_rad))
+    s = float(np.sin(angle_rad))
+    return np.array(
+        [
+            [c, 0.0, s],
+            [0.0, 1.0, 0.0],
+            [-s, 0.0, c],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _rotation_z(angle_rad: float) -> np.ndarray:
+    c = float(np.cos(angle_rad))
+    s = float(np.sin(angle_rad))
+    return np.array(
+        [
+            [c, -s, 0.0],
+            [s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+
+def random_rotation_matrix(
+    rng: np.random.Generator,
+    yaw_deg: float,
+    pitch_deg: float,
+    roll_deg: float,
+) -> np.ndarray:
+    """Sample bounded yaw/pitch/roll augmentation and build SO(3) matrix.
+
+    Yaw is sampled around Z (left-right turn), while pitch and roll are around
+    Y and X with smaller ranges for realistic IOS scanner perturbations.
+    """
+    yaw_rad = np.deg2rad(float(rng.uniform(-yaw_deg, yaw_deg)))
+    pitch_rad = np.deg2rad(float(rng.uniform(-pitch_deg, pitch_deg)))
+    roll_rad = np.deg2rad(float(rng.uniform(-roll_deg, roll_deg)))
+
+    rz = _rotation_z(yaw_rad)
+    ry = _rotation_y(pitch_rad)
+    rx = _rotation_x(roll_rad)
+    return (rz @ ry @ rx).astype(np.float32)
 
 
 def augment_points(
@@ -109,13 +151,23 @@ def rot6d_to_matrix(rot_6d: torch.Tensor) -> torch.Tensor:
     return torch.stack((b1, b2, b3), dim=-1)
 
 
-def geodesic_distance_rad(pred_rotation: torch.Tensor, gt_rotation: torch.Tensor) -> torch.Tensor:
+def geodesic_distance_rad(
+    pred_rotation: torch.Tensor,
+    gt_rotation: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
     """Geodesic angle (radians) between two rotation matrices."""
     rel = pred_rotation.transpose(-1, -2) @ gt_rotation
     trace = rel[..., 0, 0] + rel[..., 1, 1] + rel[..., 2, 2]
-    cos_theta = torch.clamp((trace - 1.0) * 0.5, -1.0, 1.0)
+    cos_theta = (trace - 1.0) * 0.5
+    if eps > 0.0:
+        cos_theta = torch.clamp(cos_theta, -1.0 + eps, 1.0 - eps)
+    else:
+        cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
     return torch.acos(cos_theta)
 
 
-def geodesic_loss(pred_rotation: torch.Tensor, gt_rotation: torch.Tensor) -> torch.Tensor:
+def geodesic_loss(
+    pred_rotation: torch.Tensor, gt_rotation: torch.Tensor
+) -> torch.Tensor:
     return geodesic_distance_rad(pred_rotation, gt_rotation).mean()

@@ -6,3 +6,6 @@ outputs
 runs
 __pycache__
 *.pyc
+venv
+inputs
+outputs

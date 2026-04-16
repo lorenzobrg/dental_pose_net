@@ -29,6 +29,65 @@ def seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
 
 
+class CosineWarmupLRScheduler:
+    """Epoch-level linear warmup + cosine decay scheduler."""
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        total_epochs: int,
+        warmup_epochs: int,
+        min_ratio: float,
+    ) -> None:
+        self.optimizer = optimizer
+        self.total_epochs = max(1, int(total_epochs))
+        self.warmup_epochs = max(0, int(warmup_epochs))
+        # Keep at least one epoch for cosine stage when possible.
+        self.warmup_epochs = min(self.warmup_epochs, max(0, self.total_epochs - 1))
+        self.min_ratio = float(np.clip(min_ratio, 0.0, 1.0))
+        self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        self.last_epoch = 0
+
+    def _ratio_for_epoch(self, epoch: int) -> float:
+        epoch = int(np.clip(epoch, 1, self.total_epochs))
+
+        if self.warmup_epochs > 0 and epoch <= self.warmup_epochs:
+            return float(epoch) / float(self.warmup_epochs)
+
+        cosine_span = max(1, self.total_epochs - self.warmup_epochs - 1)
+        cosine_step = max(0, epoch - self.warmup_epochs - 1)
+        progress = float(np.clip(cosine_step / cosine_span, 0.0, 1.0))
+        cosine = 0.5 * (1.0 + float(np.cos(np.pi * progress)))
+        return self.min_ratio + (1.0 - self.min_ratio) * cosine
+
+    def step_for_epoch(self, epoch: int) -> float:
+        ratio = self._ratio_for_epoch(epoch)
+        for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            group["lr"] = base_lr * ratio
+        self.last_epoch = int(epoch)
+        return float(self.optimizer.param_groups[0]["lr"])
+
+    def state_dict(self) -> Dict[str, float | int | list[float]]:
+        return {
+            "total_epochs": self.total_epochs,
+            "warmup_epochs": self.warmup_epochs,
+            "min_ratio": self.min_ratio,
+            "base_lrs": [float(x) for x in self.base_lrs],
+            "last_epoch": self.last_epoch,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, float | int | list[float]]) -> None:
+        base_lrs = state_dict.get("base_lrs")
+        if isinstance(base_lrs, list) and len(base_lrs) == len(
+            self.optimizer.param_groups
+        ):
+            self.base_lrs = [float(x) for x in base_lrs]
+        self.last_epoch = int(state_dict.get("last_epoch", 0))
+
+        if self.last_epoch > 0:
+            self.step_for_epoch(self.last_epoch)
+
+
 def run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -38,6 +97,7 @@ def run_epoch(
     epoch: int,
     total_epochs: int,
     log_every_steps: int,
+    grad_clip_norm: float = 0.0,
 ) -> Tuple[float, Dict[str, float]]:
     training = optimizer is not None
     model.train(training)
@@ -66,6 +126,10 @@ def run_epoch(
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if grad_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=grad_clip_norm
+                    )
                 optimizer.step()
 
             losses.append(float(loss.item()))
@@ -74,7 +138,9 @@ def run_epoch(
 
             running_loss += float(loss.item())
             running_deg += float(errors_deg.mean().item())
-            should_update = (step == 1) or (step % log_every_steps == 0) or (step == len(loader))
+            should_update = (
+                (step == 1) or (step % log_every_steps == 0) or (step == len(loader))
+            )
             if should_update:
                 pbar.set_postfix(
                     loss=f"{running_loss / step:.4f}",
@@ -82,7 +148,9 @@ def run_epoch(
                 )
 
     loss_mean = float(np.mean(losses)) if losses else 0.0
-    errors = np.concatenate(all_errors) if all_errors else np.array([], dtype=np.float32)
+    errors = (
+        np.concatenate(all_errors) if all_errors else np.array([], dtype=np.float32)
+    )
     metrics = summarize_rotation_errors(errors)
     return loss_mean, metrics
 
@@ -107,6 +175,9 @@ def main() -> None:
         split="train",
         training=True,
         ram_cache_size=cfg.npz_ram_cache_size,
+        rotation_yaw_deg=cfg.rotation_yaw_deg,
+        rotation_pitch_deg=cfg.rotation_pitch_deg,
+        rotation_roll_deg=cfg.rotation_roll_deg,
         point_dropout=cfg.point_dropout,
         keep_ratio_min=cfg.keep_ratio_min,
         keep_ratio_max=cfg.keep_ratio_max,
@@ -119,6 +190,9 @@ def main() -> None:
         split="val",
         training=False,
         ram_cache_size=cfg.npz_ram_cache_size,
+        rotation_yaw_deg=cfg.rotation_yaw_deg,
+        rotation_pitch_deg=cfg.rotation_pitch_deg,
+        rotation_roll_deg=cfg.rotation_roll_deg,
         point_dropout=0.0,
         keep_ratio_min=1.0,
         keep_ratio_max=1.0,
@@ -158,12 +232,17 @@ def main() -> None:
         f"| train_workers={cfg.num_workers} "
         f"| npz_ram_cache_size={cfg.npz_ram_cache_size} "
         f"| batch_size={cfg.batch_size} "
+        f"| rot_yaw={cfg.rotation_yaw_deg} "
+        f"| rot_pitch={cfg.rotation_pitch_deg} "
+        f"| rot_roll={cfg.rotation_roll_deg} "
         f"| points_upper={cfg.num_points_upper} "
         f"| points_lower={cfg.num_points_lower} "
         f"| train_cases={len(train_dataset)} "
         f"| val_cases={len(val_dataset)}"
     )
-    print("Columns: epoch | train_deg | val_deg | val_median | <5% | <10% | <15% | best | ckpt")
+    print(
+        "Columns: epoch | lr | train_deg | val_deg | val_median | <5% | <10% | <15% | best | ckpt"
+    )
 
     model = PairPointNetRot6D(
         feature_dim=cfg.feature_dim,
@@ -175,8 +254,17 @@ def main() -> None:
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
     )
+    scheduler = CosineWarmupLRScheduler(
+        optimizer=optimizer,
+        total_epochs=cfg.epochs,
+        warmup_epochs=cfg.lr_warmup_epochs,
+        min_ratio=cfg.lr_min_ratio,
+    )
 
     start_epoch = 1
+    best_val_mean = float("inf")
+    epochs_since_improvement = 0
+
     if cfg.resume_checkpoint:
         resume_path = Path(cfg.resume_checkpoint)
         if not resume_path.exists():
@@ -185,17 +273,48 @@ def main() -> None:
         model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        print(f"Resumed from checkpoint: {resume_path} (start_epoch={start_epoch})")
+        best_val_mean = float(
+            checkpoint.get(
+                "best_val_mean",
+                checkpoint.get("val_metrics", {}).get("mean_deg", float("inf")),
+            )
+        )
+        epochs_since_improvement = int(checkpoint.get("epochs_since_improvement", 0))
+
+        if cfg.override_lr_on_resume:
+            for group in optimizer.param_groups:
+                group["lr"] = cfg.lr
+            scheduler = CosineWarmupLRScheduler(
+                optimizer=optimizer,
+                total_epochs=cfg.epochs,
+                warmup_epochs=cfg.lr_warmup_epochs,
+                min_ratio=cfg.lr_min_ratio,
+            )
+            if start_epoch > 1:
+                scheduler.step_for_epoch(start_epoch - 1)
+            print(
+                f"Resumed from checkpoint: {resume_path} (start_epoch={start_epoch}, "
+                f"override_lr_on_resume=True, lr={cfg.lr:.6g})"
+            )
+        else:
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            elif start_epoch > 1:
+                scheduler.step_for_epoch(start_epoch - 1)
+            print(f"Resumed from checkpoint: {resume_path} (start_epoch={start_epoch})")
 
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = save_dir / "best.pt"
 
-    best_val_mean = float("inf")
-
-    epoch_bar = tqdm(range(start_epoch, cfg.epochs + 1), desc="epochs", dynamic_ncols=True)
+    epoch_bar = tqdm(
+        range(start_epoch, cfg.epochs + 1), desc="epochs", dynamic_ncols=True
+    )
     for epoch in epoch_bar:
+        current_lr = scheduler.step_for_epoch(epoch)
+
         train_loss, train_metrics = run_epoch(
             model,
             train_loader,
@@ -205,6 +324,7 @@ def main() -> None:
             epoch=epoch,
             total_epochs=cfg.epochs,
             log_every_steps=cfg.log_every_steps,
+            grad_clip_norm=cfg.grad_clip_norm,
         )
         val_loss, val_metrics = run_epoch(
             model,
@@ -217,21 +337,34 @@ def main() -> None:
             log_every_steps=max(1, cfg.log_every_steps // 2),
         )
 
-        improved = val_metrics["mean_deg"] < best_val_mean
+        improved = val_metrics["mean_deg"] < (
+            best_val_mean - cfg.early_stopping_min_delta
+        )
         if improved:
             best_val_mean = val_metrics["mean_deg"]
+            epochs_since_improvement = 0
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
                 "config": vars(cfg),
                 "val_metrics": val_metrics,
+                "best_val_mean": best_val_mean,
+                "epochs_since_improvement": epochs_since_improvement,
             }
             torch.save(checkpoint, best_path)
+        else:
+            epochs_since_improvement += 1
 
-        epoch_bar.set_postfix(best_deg=f"{best_val_mean:.2f}", val_deg=f"{val_metrics['mean_deg']:.2f}")
+        epoch_bar.set_postfix(
+            best_deg=f"{best_val_mean:.2f}",
+            val_deg=f"{val_metrics['mean_deg']:.2f}",
+            lr=f"{current_lr:.2e}",
+        )
         tqdm.write(
             f"{epoch:03d} | "
+            f"{current_lr:.2e} | "
             f"{train_metrics['mean_deg']:8.2f} | "
             f"{val_metrics['mean_deg']:7.2f} | "
             f"{val_metrics['median_deg']:10.2f} | "
@@ -241,6 +374,17 @@ def main() -> None:
             f"{best_val_mean:6.2f} | "
             f"{'saved' if improved else '-'}"
         )
+
+        if (
+            cfg.early_stopping_patience > 0
+            and epochs_since_improvement >= cfg.early_stopping_patience
+        ):
+            tqdm.write(
+                f"Early stopping at epoch {epoch:03d} "
+                f"(no val improvement > {cfg.early_stopping_min_delta:.4f} "
+                f"for {cfg.early_stopping_patience} epoch(s))."
+            )
+            break
 
     print(f"Training finished. Best checkpoint: {best_path}")
 

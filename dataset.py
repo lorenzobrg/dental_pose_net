@@ -8,7 +8,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.geometry import augment_points, joint_normalize_pair, random_rotation_matrix, rotate_points
+from utils.geometry import (
+    augment_points,
+    joint_normalize_pair,
+    random_rotation_matrix,
+    rotate_points,
+)
 from utils.io_mesh import load_mesh, sample_points_from_mesh
 
 
@@ -22,6 +27,9 @@ class IOSPairRotationDataset(Dataset):
         num_points_upper: int,
         num_points_lower: int,
         training: bool,
+        rotation_yaw_deg: float = 90.0,
+        rotation_pitch_deg: float = 10.0,
+        rotation_roll_deg: float = 10.0,
         subset_start: int = 0,
         subset_end: int | None = None,
         cache_points_in_memory: bool = True,
@@ -45,6 +53,10 @@ class IOSPairRotationDataset(Dataset):
         self.cache_preload = cache_preload
         self.cache_max_items = max(0, int(cache_max_items))
 
+        self.rotation_yaw_deg = float(rotation_yaw_deg)
+        self.rotation_pitch_deg = float(rotation_pitch_deg)
+        self.rotation_roll_deg = float(rotation_roll_deg)
+
         self.point_dropout = point_dropout
         self.keep_ratio_min = keep_ratio_min
         self.keep_ratio_max = keep_ratio_max
@@ -53,12 +65,16 @@ class IOSPairRotationDataset(Dataset):
         self.base_seed = base_seed
 
         all_cases = self._discover_cases()
-        end = len(all_cases) if self.subset_end is None else min(len(all_cases), int(self.subset_end))
+        end = (
+            len(all_cases)
+            if self.subset_end is None
+            else min(len(all_cases), int(self.subset_end))
+        )
         if self.subset_start >= end:
             raise RuntimeError(
                 f"Invalid subset range start={self.subset_start}, end={end}, total_cases={len(all_cases)}"
             )
-        self.cases = all_cases[self.subset_start:end]
+        self.cases = all_cases[self.subset_start : end]
         if len(self.cases) == 0:
             raise RuntimeError(f"No valid cases found in {self.root}")
 
@@ -103,17 +119,23 @@ class IOSPairRotationDataset(Dataset):
             cache.append({"upper": upper_points, "lower": lower_points})
         return cache
 
-    def _load_normalized_pair_points(self, idx: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    def _load_normalized_pair_points(
+        self, idx: int, rng: np.random.Generator
+    ) -> tuple[np.ndarray, np.ndarray]:
         case = self.cases[idx]
         upper_mesh = load_mesh(case["upper"])
         lower_mesh = load_mesh(case["lower"])
 
         upper_points = sample_points_from_mesh(upper_mesh, self.num_points_upper, rng)
         lower_points = sample_points_from_mesh(lower_mesh, self.num_points_lower, rng)
-        upper_points, lower_points, _, _ = joint_normalize_pair(upper_points, lower_points)
+        upper_points, lower_points, _, _ = joint_normalize_pair(
+            upper_points, lower_points
+        )
         return upper_points, lower_points
 
-    def _get_cached_or_load_points(self, idx: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    def _get_cached_or_load_points(
+        self, idx: int, rng: np.random.Generator
+    ) -> tuple[np.ndarray, np.ndarray]:
         if self._preloaded_points is not None:
             cached = self._preloaded_points[idx]
             return cached["upper"], cached["lower"]
@@ -149,7 +171,12 @@ class IOSPairRotationDataset(Dataset):
 
         upper_points, lower_points = self._get_cached_or_load_points(idx, rng)
 
-        rotation_aug = random_rotation_matrix(rng)
+        rotation_aug = random_rotation_matrix(
+            rng,
+            yaw_deg=self.rotation_yaw_deg,
+            pitch_deg=self.rotation_pitch_deg,
+            roll_deg=self.rotation_roll_deg,
+        )
         upper_input = rotate_points(upper_points, rotation_aug)
         lower_input = rotate_points(lower_points, rotation_aug)
 

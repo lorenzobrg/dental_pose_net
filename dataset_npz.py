@@ -20,6 +20,9 @@ class IOSPairRotationNPZDataset(Dataset):
         split: str,
         training: bool,
         ram_cache_size: int,
+        rotation_yaw_deg: float = 90.0,
+        rotation_pitch_deg: float = 10.0,
+        rotation_roll_deg: float = 10.0,
         point_dropout: float = 0.1,
         keep_ratio_min: float = 0.75,
         keep_ratio_max: float = 1.0,
@@ -31,6 +34,10 @@ class IOSPairRotationNPZDataset(Dataset):
         self.split = split
         self.training = training
         self.ram_cache_size = max(1, int(ram_cache_size))
+
+        self.rotation_yaw_deg = float(rotation_yaw_deg)
+        self.rotation_pitch_deg = float(rotation_pitch_deg)
+        self.rotation_roll_deg = float(rotation_roll_deg)
 
         self.point_dropout = point_dropout
         self.keep_ratio_min = keep_ratio_min
@@ -97,7 +104,12 @@ class IOSPairRotationNPZDataset(Dataset):
         upper_points = sample["upper"]
         lower_points = sample["lower"]
 
-        rotation_aug = random_rotation_matrix(rng)
+        rotation_aug = random_rotation_matrix(
+            rng,
+            yaw_deg=self.rotation_yaw_deg,
+            pitch_deg=self.rotation_pitch_deg,
+            roll_deg=self.rotation_roll_deg,
+        )
         upper_input = rotate_points(upper_points, rotation_aug)
         lower_input = rotate_points(lower_points, rotation_aug)
 
